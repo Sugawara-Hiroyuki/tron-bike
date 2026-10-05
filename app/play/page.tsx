@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import GameCanvas from "@/features/game/GameCanvas";
 
 export const metadata: Metadata = {
   title: "PLAY",
@@ -7,9 +8,11 @@ export const metadata: Metadata = {
 
 export default function PlayPage() {
   return (
-    <main className="flex flex-1 flex-col items-center justify-center gap-8 px-6">
-      <h1 className="neon-text text-3xl tracking-widest text-player">PLAY</h1>
-      <p className="text-sm text-foreground/70">ゲーム画面は次のフェーズで実装します</p>
+    <main className="flex flex-1 flex-col items-center justify-center gap-6 px-4 py-6">
+      <GameCanvas />
+      <p className="text-xs tracking-widest text-foreground/60">
+        矢印キー / WASD で方向転換 ・ SPACE で開始
+      </p>
       <Link href="/" className="text-sm tracking-widest text-foreground/70 hover:text-player">
         ← TITLE
       </Link>
