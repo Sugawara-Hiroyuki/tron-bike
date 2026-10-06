@@ -25,6 +25,7 @@ export async function getTopScores(): Promise<ScoreRow[]> {
   const rows = await sql`
     select id::int as id, name, score, stage, created_at::text as "createdAt"
     from scores
+    where not hidden
     order by score desc, created_at asc
     limit ${TOP_LIMIT}
   `;
@@ -37,6 +38,7 @@ export async function getRecentScores(): Promise<ScoreRow[]> {
   const rows = await sql`
     select id::int as id, name, score, stage, created_at::text as "createdAt"
     from scores
+    where not hidden
     order by created_at desc
     limit ${RECENT_LIMIT}
   `;

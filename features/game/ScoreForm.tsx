@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useActionState } from "react";
 import { submitScore, type SubmitScoreState } from "@/features/ranking/actions";
+import { NAME_MAX_LENGTH } from "@/features/ranking/name";
 
 const INITIAL_STATE: SubmitScoreState = { status: "idle", message: "" };
 
@@ -28,7 +29,7 @@ export default function ScoreForm({ score, stage }: { score: number; stage: numb
         <input
           name="name"
           required
-          maxLength={12}
+          maxLength={NAME_MAX_LENGTH}
           placeholder="NAME"
           aria-label="名前"
           autoComplete="off"
