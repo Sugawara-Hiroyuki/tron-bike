@@ -59,6 +59,11 @@ export function stageScore(ticks: number): number {
   return WIN_SCORE + Math.max(0, BONUS_TICKS - ticks);
 }
 
+// stage で負けた時点で取りうる最高得点（サーバー側で申告スコアの妥当性を確かめるのに使う）
+export function maxScoreAtStage(stage: number): number {
+  return (stage - 1) * stageScore(0);
+}
+
 export function cellIndex(game: Game, x: number, y: number): number {
   return y * game.cols + x;
 }

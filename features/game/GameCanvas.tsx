@@ -16,6 +16,7 @@ import {
   type Result,
 } from "./engine";
 import { CELL_SIZE, draw } from "./renderer";
+import ScoreForm from "./ScoreForm";
 
 const WIDTH = COLS * CELL_SIZE;
 const HEIGHT = ROWS * CELL_SIZE;
@@ -90,6 +91,8 @@ export default function GameCanvas() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // 名前入力中のキー（スペースや WASD）をゲーム操作として拾わない
+      if (event.target instanceof HTMLInputElement) return;
       if (event.key === " ") {
         event.preventDefault();
         if (game.phase === "running") return;
@@ -149,10 +152,13 @@ export default function GameCanvas() {
         )}
         {hud.phase === "over" && message && (
           <div
-            className={`pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/60 ${message.color}`}
+            className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/60 ${message.color}`}
           >
             <p className="neon-text text-4xl font-black tracking-[0.2em]">{message.title}</p>
             <p className="text-sm tracking-widest">{message.hint}</p>
+            {hud.result === "lose" && hud.score > 0 && (
+              <ScoreForm score={hud.score} stage={hud.stage} />
+            )}
           </div>
         )}
       </div>
