@@ -5,7 +5,7 @@ export default function Home() {
     <main className="flex flex-1 flex-col items-center justify-center gap-12 px-6 text-center">
       <div className="flex flex-col gap-4">
         <h1 className="neon-text text-5xl font-black tracking-[0.3em] text-player sm:text-7xl">
-          TRON BIKE
+          LIGHT BIKE
         </h1>
         <p className="text-sm tracking-widest text-foreground/70">
           光の壁で相手を囲め

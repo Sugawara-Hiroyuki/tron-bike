@@ -14,10 +14,10 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "TRON BIKE",
-    template: "%s | TRON BIKE",
+    default: "LIGHT BIKE",
+    template: "%s | LIGHT BIKE",
   },
-  description: "光の壁を引き合うライトサイクルゲーム。CPUに勝ち続けてハイスコアを狙え。",
+  description: "光の壁を引き合うバイクゲーム。CPUに勝ち続けてハイスコアを狙え。",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
