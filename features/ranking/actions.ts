@@ -1,7 +1,9 @@
 "use server";
 
+import { updateTag } from "next/cache";
 import { maxScoreAtStage } from "@/features/game/engine";
 import { getSql } from "@/lib/db";
+import { SCORES_TAG } from "./queries";
 
 export type SubmitScoreState = {
   status: "idle" | "success" | "error";
@@ -37,5 +39,7 @@ export async function submitScore(
     return { status: "error", message: "スコアを保存できませんでした。時間をおいて試してください" };
   }
 
+  // 自分の登録がすぐランキングに出るよう、キャッシュ済みの上位一覧を即時に無効化する
+  updateTag(SCORES_TAG);
   return { status: "success", message: "スコアを登録しました" };
 }
