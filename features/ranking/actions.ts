@@ -3,6 +3,7 @@
 import { updateTag } from "next/cache";
 import { maxScoreAtStage } from "@/features/game/engine";
 import { getSql } from "@/lib/db";
+import { NAME_MAX_LENGTH, normalizeName } from "./name";
 import { SCORES_TAG } from "./queries";
 
 export type SubmitScoreState = {
@@ -10,7 +11,6 @@ export type SubmitScoreState = {
   message: string;
 };
 
-const NAME_MAX_LENGTH = 12;
 const STAGE_MAX = 999;
 
 // Server Action は公開された POST エンドポイントなので、フォームの値は必ずここで検証する
@@ -18,12 +18,15 @@ export async function submitScore(
   _prevState: SubmitScoreState,
   formData: FormData,
 ): Promise<SubmitScoreState> {
-  const name = String(formData.get("name") ?? "").trim();
+  const name = normalizeName(String(formData.get("name") ?? ""));
   const score = Number(formData.get("score"));
   const stage = Number(formData.get("stage"));
 
-  if (name.length < 1 || name.length > NAME_MAX_LENGTH) {
-    return { status: "error", message: `名前は1〜${NAME_MAX_LENGTH}文字で入力してください` };
+  if (name === null) {
+    return {
+      status: "error",
+      message: `名前は1〜${NAME_MAX_LENGTH}文字で、文字と数字のみ使えます（記号・絵文字は不可）`,
+    };
   }
   if (!Number.isInteger(stage) || stage < 1 || stage > STAGE_MAX) {
     return { status: "error", message: "ステージの値が不正です" };
