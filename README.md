@@ -4,6 +4,7 @@
 
 - 2D Canvas・CPU 対戦。勝つとステージが進み、速くなる
 - 操作: 矢印キー / WASD で方向転換、SPACE で開始
+- 走行中の SPACE でブースト。2 秒間スピードが最大 2 倍になる（負けるまでに 3 回）
 - スコアは Server Action で Neon Postgres に保存し、`/ranking` に表示
 
 ## 開発
