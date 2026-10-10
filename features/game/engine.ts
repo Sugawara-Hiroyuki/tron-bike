@@ -25,6 +25,9 @@ export type Game = {
   result: Result | null;
   stage: number;
   ticks: number;
+  boostsLeft: number;
+  // ブースト開始からの経過時間。null はブーストしていない
+  boostElapsedMs: number | null;
 };
 
 export const CELL: Record<BikeId, number> = { player: 1, cpu: 2 };
@@ -48,6 +51,12 @@ const BONUS_TICKS = 600;
 const BASE_TICK_MS = 70;
 const MIN_TICK_MS = 35;
 const TICK_MS_PER_STAGE = 5;
+
+export const MAX_BOOSTS = 3;
+const BOOST_MS = 2000;
+const BOOST_RAMP_UP_MS = 300;
+const BOOST_RAMP_DOWN_MS = 500;
+const BOOST_MULTIPLIER = 2;
 
 // ステージが進むほど 1 tick が短くなる（= 速くなる）
 export function tickMs(stage: number): number {
@@ -73,7 +82,7 @@ export function isBlocked(game: Game, x: number, y: number): boolean {
   return game.cells[cellIndex(game, x, y)] !== 0;
 }
 
-export function createGame(stage = 1): Game {
+export function createGame(stage = 1, boostsLeft = MAX_BOOSTS): Game {
   const y = Math.floor(ROWS / 2);
   const game: Game = {
     cols: COLS,
@@ -87,6 +96,8 @@ export function createGame(stage = 1): Game {
     result: null,
     stage,
     ticks: 0,
+    boostsLeft,
+    boostElapsedMs: null,
   };
   for (const bike of game.bikes) {
     game.cells[cellIndex(game, bike.x, bike.y)] = CELL[bike.id];
@@ -104,17 +115,45 @@ export function turn(bike: Bike, dir: Direction): void {
   bike.nextDir = dir;
 }
 
-export function step(game: Game): void {
-  if (game.phase !== "running") return;
+// ブーストは同時に1つだけ。重ねがけはできず、押しても残数は減らない
+export function activateBoost(game: Game): boolean {
+  if (game.phase !== "running" || game.boostsLeft <= 0 || game.boostElapsedMs !== null) {
+    return false;
+  }
+  game.boostsLeft -= 1;
+  game.boostElapsedMs = 0;
+  return true;
+}
 
+export function advanceBoost(game: Game, dtMs: number): void {
+  if (game.phase !== "running" || game.boostElapsedMs === null) return;
+  game.boostElapsedMs += dtMs;
+  if (game.boostElapsedMs >= BOOST_MS) game.boostElapsedMs = null;
+}
+
+// 自機の速度倍率。グインと立ち上がり、最後はなめらかに 1 へ戻る
+export function boostMultiplier(game: Game): number {
+  const elapsed = game.boostElapsedMs;
+  if (elapsed === null) return 1;
+  const extra = BOOST_MULTIPLIER - 1;
+  if (elapsed < BOOST_RAMP_UP_MS) {
+    const t = elapsed / BOOST_RAMP_UP_MS;
+    return 1 + extra * (1 - (1 - t) ** 3);
+  }
+  const rampDownStart = BOOST_MS - BOOST_RAMP_DOWN_MS;
+  if (elapsed < rampDownStart) return BOOST_MULTIPLIER;
+  const t = Math.min(1, (elapsed - rampDownStart) / BOOST_RAMP_DOWN_MS);
+  const eased = t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
+  return BOOST_MULTIPLIER - extra * eased;
+}
+
+function moveBikes(game: Game, bikes: Bike[]): void {
   // 全員の移動先を先に決めてから判定する（順番に動かすと先に動いた側が有利になる）
-  const moves = game.bikes
-    .filter((bike) => bike.alive)
-    .map((bike) => {
-      bike.dir = bike.nextDir;
-      const { dx, dy } = DELTA[bike.dir];
-      return { bike, x: bike.x + dx, y: bike.y + dy };
-    });
+  const moves = bikes.map((bike) => {
+    bike.dir = bike.nextDir;
+    const { dx, dy } = DELTA[bike.dir];
+    return { bike, x: bike.x + dx, y: bike.y + dy };
+  });
 
   for (const move of moves) {
     const headOn = moves.some(
@@ -131,9 +170,9 @@ export function step(game: Game): void {
     bike.y = y;
     game.cells[cellIndex(game, x, y)] = CELL[bike.id];
   }
+}
 
-  game.ticks += 1;
-
+function settle(game: Game): void {
   const playerAlive = getBike(game, "player")?.alive ?? false;
   const cpuAlive = getBike(game, "cpu")?.alive ?? false;
   if (playerAlive && cpuAlive) return;
@@ -142,4 +181,23 @@ export function step(game: Game): void {
   if (playerAlive) game.result = "win";
   else if (cpuAlive) game.result = "lose";
   else game.result = "draw";
+}
+
+export function step(game: Game): void {
+  if (game.phase !== "running") return;
+  moveBikes(
+    game,
+    game.bikes.filter((bike) => bike.alive),
+  );
+  game.ticks += 1;
+  settle(game);
+}
+
+// ブースト中に自機だけを追加で 1 マス進める。ticks は増やさない（スコアの早解きボーナスに影響させない）
+export function boostStep(game: Game): void {
+  if (game.phase !== "running") return;
+  const player = getBike(game, "player");
+  if (!player?.alive) return;
+  moveBikes(game, [player]);
+  settle(game);
 }

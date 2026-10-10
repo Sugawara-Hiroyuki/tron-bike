@@ -4,7 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { chooseDirection } from "./ai";
 import {
   COLS,
+  MAX_BOOSTS,
   ROWS,
+  activateBoost,
+  advanceBoost,
+  boostMultiplier,
+  boostStep,
   createGame,
   getBike,
   stageScore,
@@ -22,6 +27,8 @@ const WIDTH = COLS * CELL_SIZE;
 const HEIGHT = ROWS * CELL_SIZE;
 // タブが裏に回って戻ったときに、溜まった時間ぶん一気に進まないようにする上限
 const MAX_FRAME_MS = 250;
+// 決着の直後は SPACE を受け付けない（ブーストの押下で結果画面を飛ばしてしまうのを防ぐ）
+const RESTART_GUARD_MS = 600;
 
 const KEY_TO_DIRECTION: Record<string, Direction> = {
   ArrowUp: "up",
@@ -46,9 +53,16 @@ type Hud = {
   result: Result | null;
   stage: number;
   score: number;
+  boosts: number;
 };
 
-const INITIAL_HUD: Hud = { phase: "ready", result: null, stage: 1, score: 0 };
+const INITIAL_HUD: Hud = {
+  phase: "ready",
+  result: null,
+  stage: 1,
+  score: 0,
+  boosts: MAX_BOOSTS,
+};
 
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -68,26 +82,42 @@ export default function GameCanvas() {
     let game = createGame();
     let score = 0;
     let shownPhase: Phase = game.phase;
+    let shownBoosts = game.boostsLeft;
+    // 別ページから戻ると React の state だけ前回の値で残るので、最初のフレームで必ず HUD を合わせ直す
+    let hudSynced = false;
+    let overAt = 0;
     let accumulator = 0;
+    let boostAccumulator = 0;
     let last = performance.now();
     let frameId = 0;
 
     const syncHud = () => {
-      if (game.phase === shownPhase) return;
-      if (game.phase === "over" && game.result === "win") {
-        score += stageScore(game.ticks);
+      if (hudSynced && game.phase === shownPhase && game.boostsLeft === shownBoosts) return;
+      hudSynced = true;
+      if (game.phase !== shownPhase && game.phase === "over") {
+        overAt = performance.now();
+        if (game.result === "win") score += stageScore(game.ticks);
       }
       shownPhase = game.phase;
-      setHud({ phase: game.phase, result: game.result, stage: game.stage, score });
+      shownBoosts = game.boostsLeft;
+      setHud({
+        phase: game.phase,
+        result: game.result,
+        stage: game.stage,
+        score,
+        boosts: game.boostsLeft,
+      });
     };
 
     const startNextRound = () => {
       if (game.result === "lose") score = 0;
       const stage =
         game.result === "win" ? game.stage + 1 : game.result === "lose" ? 1 : game.stage;
-      game = createGame(stage);
+      // ブーストの残数は負けるまで持ち越す
+      game = createGame(stage, game.result === "lose" ? MAX_BOOSTS : game.boostsLeft);
       game.phase = "running";
       accumulator = 0;
+      boostAccumulator = 0;
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -95,7 +125,13 @@ export default function GameCanvas() {
       if (event.target instanceof HTMLInputElement) return;
       if (event.key === " ") {
         event.preventDefault();
-        if (game.phase === "running") return;
+        if (event.repeat) return;
+        if (game.phase === "running") {
+          activateBoost(game);
+          syncHud();
+          return;
+        }
+        if (game.phase === "over" && performance.now() - overAt < RESTART_GUARD_MS) return;
         startNextRound();
         syncHud();
         return;
@@ -108,7 +144,8 @@ export default function GameCanvas() {
     };
 
     const frame = (now: number) => {
-      accumulator += Math.min(now - last, MAX_FRAME_MS);
+      const dt = Math.min(now - last, MAX_FRAME_MS);
+      accumulator += dt;
       last = now;
       const interval = tickMs(game.stage);
       while (accumulator >= interval) {
@@ -117,6 +154,14 @@ export default function GameCanvas() {
         step(game);
         accumulator -= interval;
       }
+      // 倍率が 1 を超えたぶんだけ、自機を追加で進める
+      boostAccumulator += dt * (boostMultiplier(game) - 1);
+      advanceBoost(game, dt);
+      while (boostAccumulator >= interval) {
+        boostStep(game);
+        boostAccumulator -= interval;
+      }
+      if (game.boostElapsedMs === null) boostAccumulator = 0;
       syncHud();
       draw(ctx, game);
       frameId = requestAnimationFrame(frame);
@@ -137,6 +182,15 @@ export default function GameCanvas() {
     <div className="flex w-full max-w-[960px] flex-col gap-3">
       <div className="flex justify-between text-sm tracking-widest">
         <span className="text-player">STAGE {hud.stage}</span>
+        <span className="flex items-center gap-2 text-player">
+          BOOST
+          {Array.from({ length: MAX_BOOSTS }, (_, i) => (
+            <span
+              key={i}
+              className={`h-2 w-4 border border-player ${i < hud.boosts ? "bg-player" : ""}`}
+            />
+          ))}
+        </span>
         <span className="font-mono text-foreground">SCORE {hud.score}</span>
       </div>
       <div className="relative">
