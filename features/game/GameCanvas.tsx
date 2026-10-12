@@ -29,6 +29,8 @@ const HEIGHT = ROWS * CELL_SIZE;
 const MAX_FRAME_MS = 250;
 // 決着の直後は SPACE を受け付けない（ブーストの押下で結果画面を飛ばしてしまうのを防ぐ）
 const RESTART_GUARD_MS = 600;
+// これ以上指が動いたらスワイプとみなす
+const SWIPE_THRESHOLD_PX = 24;
 
 const KEY_TO_DIRECTION: Record<string, Direction> = {
   ArrowUp: "up",
@@ -41,11 +43,20 @@ const KEY_TO_DIRECTION: Record<string, Direction> = {
   d: "right",
 };
 
+// hint の前には、キーボードなら「SPACE」、タッチ操作なら「タップ」を付けて表示する
 const RESULT_MESSAGES: Record<Result, { title: string; hint: string; color: string }> = {
-  win: { title: "YOU WIN", hint: "SPACE で次のステージへ", color: "text-player" },
-  lose: { title: "GAME OVER", hint: "SPACE でもう一度", color: "text-cpu" },
-  draw: { title: "DRAW", hint: "SPACE で再戦", color: "text-foreground" },
+  win: { title: "YOU WIN", hint: "で次のステージへ", color: "text-player" },
+  lose: { title: "GAME OVER", hint: "でもう一度", color: "text-cpu" },
+  draw: { title: "DRAW", hint: "で再戦", color: "text-foreground" },
 };
+
+// 方向ボタンの並び。十字に置くための grid 上の位置と、▲ を回す角度を持つ
+const DPAD_BUTTONS: { direction: Direction; label: string; position: string; rotate: string }[] = [
+  { direction: "up", label: "上", position: "col-start-2 row-start-1", rotate: "" },
+  { direction: "left", label: "左", position: "col-start-1 row-start-2", rotate: "-rotate-90" },
+  { direction: "right", label: "右", position: "col-start-3 row-start-2", rotate: "rotate-90" },
+  { direction: "down", label: "下", position: "col-start-2 row-start-3", rotate: "rotate-180" },
+];
 
 // 画面に出す値だけを React の state にする
 type Hud = {
@@ -66,12 +77,17 @@ const INITIAL_HUD: Hud = {
 
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const touchAreaRef = useRef<HTMLDivElement>(null);
+  // BOOST ボタンと方向ボタンから effect 内のゲームを操作するための橋渡し
+  const boostRef = useRef<() => void>(() => {});
+  const turnRef = useRef<(direction: Direction) => void>(() => {});
   const [hud, setHud] = useState<Hud>(INITIAL_HUD);
 
   useEffect(() => {
     const canvas = canvasRef.current;
+    const touchArea = touchAreaRef.current;
     const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
+    if (!canvas || !touchArea || !ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     canvas.width = WIDTH * dpr;
@@ -120,27 +136,74 @@ export default function GameCanvas() {
       boostAccumulator = 0;
     };
 
+    const boost = () => {
+      activateBoost(game);
+      syncHud();
+    };
+    boostRef.current = boost;
+
+    // 走行中でなければ、開始または次のラウンドへ進む
+    const startIfIdle = () => {
+      if (game.phase === "running") return;
+      if (game.phase === "over" && performance.now() - overAt < RESTART_GUARD_MS) return;
+      startNextRound();
+      syncHud();
+    };
+
+    const turnPlayer = (direction: Direction) => {
+      const player = getBike(game, "player");
+      if (player) turn(player, direction);
+    };
+    turnRef.current = turnPlayer;
+
     const onKeyDown = (event: KeyboardEvent) => {
       // 名前入力中のキー（スペースや WASD）をゲーム操作として拾わない
       if (event.target instanceof HTMLInputElement) return;
       if (event.key === " ") {
         event.preventDefault();
         if (event.repeat) return;
-        if (game.phase === "running") {
-          activateBoost(game);
-          syncHud();
-          return;
-        }
-        if (game.phase === "over" && performance.now() - overAt < RESTART_GUARD_MS) return;
-        startNextRound();
-        syncHud();
+        if (game.phase === "running") boost();
+        else startIfIdle();
         return;
       }
       const direction = KEY_TO_DIRECTION[event.key];
       if (!direction) return;
       event.preventDefault();
-      const player = getBike(game, "player");
-      if (player) turn(player, direction);
+      turnPlayer(direction);
+    };
+
+    // タッチ操作: スワイプした向きに曲がり、タップで開始する（方向ボタンでも曲がれる）。マウスは対象にしない
+    let swipe: { id: number; x: number; y: number; moved: boolean } | null = null;
+
+    // ボタンやスコア登録フォームに触れたときは、ゲーム操作として拾わない
+    const isControl = (target: EventTarget | null) =>
+      target instanceof Element && target.closest("button, a, input, form") !== null;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "mouse" || isControl(event.target)) return;
+      swipe = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!swipe || event.pointerId !== swipe.id) return;
+      const dx = event.clientX - swipe.x;
+      const dy = event.clientY - swipe.y;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_THRESHOLD_PX) return;
+      if (Math.abs(dx) > Math.abs(dy)) turnPlayer(dx > 0 ? "right" : "left");
+      else turnPlayer(dy > 0 ? "down" : "up");
+      // 指を離さずに続けて曲がれるよう、基準点をいまの位置に移す
+      swipe = { id: swipe.id, x: event.clientX, y: event.clientY, moved: true };
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (!swipe || event.pointerId !== swipe.id) return;
+      const tapped = !swipe.moved;
+      swipe = null;
+      if (tapped) startIfIdle();
+    };
+
+    const onPointerCancel = () => {
+      swipe = null;
     };
 
     const frame = (now: number) => {
@@ -168,10 +231,18 @@ export default function GameCanvas() {
     };
 
     window.addEventListener("keydown", onKeyDown);
+    touchArea.addEventListener("pointerdown", onPointerDown);
+    touchArea.addEventListener("pointermove", onPointerMove);
+    touchArea.addEventListener("pointerup", onPointerUp);
+    touchArea.addEventListener("pointercancel", onPointerCancel);
     frameId = requestAnimationFrame(frame);
 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
+      touchArea.removeEventListener("pointerdown", onPointerDown);
+      touchArea.removeEventListener("pointermove", onPointerMove);
+      touchArea.removeEventListener("pointerup", onPointerUp);
+      touchArea.removeEventListener("pointercancel", onPointerCancel);
       cancelAnimationFrame(frameId);
     };
   }, []);
@@ -179,42 +250,81 @@ export default function GameCanvas() {
   const message = hud.result ? RESULT_MESSAGES[hud.result] : null;
 
   return (
-    <div className="flex w-full max-w-[960px] flex-col gap-3">
-      <div className="flex justify-between text-sm tracking-widest">
-        <span className="text-player">STAGE {hud.stage}</span>
-        <span className="flex items-center gap-2 text-player">
-          BOOST
-          {Array.from({ length: MAX_BOOSTS }, (_, i) => (
-            <span
-              key={i}
-              className={`h-2 w-4 border border-player ${i < hud.boosts ? "bg-player" : ""}`}
-            />
-          ))}
-        </span>
-        <span className="font-mono text-foreground">SCORE {hud.score}</span>
+    // PC は縦一列。タッチ端末は横向きが基本で、プレイ画面の左に BOOST、右に方向ボタンを置く（縦向きではプレイ画面の下に並べる）。
+    // touch-none はスワイプでページが動かないようにするため
+    <div
+      ref={touchAreaRef}
+      className="flex w-full max-w-[min(960px,calc((100dvh_-_10rem)_*_1.6))] touch-none flex-col gap-3 pointer-coarse:grid pointer-coarse:grid-cols-2 pointer-coarse:items-center pointer-coarse:landscape:max-w-none pointer-coarse:landscape:grid-cols-[auto_minmax(0,1fr)_auto]"
+    >
+      {/* 横向きでは、画面の高さに収まるいちばん大きな幅まで広げる */}
+      <div className="flex w-full flex-col gap-3 pointer-coarse:col-span-2 pointer-coarse:landscape:col-span-1 pointer-coarse:landscape:col-start-2 pointer-coarse:landscape:row-start-1 pointer-coarse:landscape:max-w-[calc((100dvh_-_4.5rem)_*_1.6)] pointer-coarse:landscape:gap-2 pointer-coarse:landscape:justify-self-center">
+        <div className="flex justify-between text-xs tracking-widest select-none sm:text-sm">
+          <span className="text-player">STAGE {hud.stage}</span>
+          <span className="flex items-center gap-2 text-player">
+            BOOST
+            {Array.from({ length: MAX_BOOSTS }, (_, i) => (
+              <span
+                key={i}
+                className={`h-2 w-4 border border-player ${i < hud.boosts ? "bg-player" : ""}`}
+              />
+            ))}
+          </span>
+          <span className="font-mono text-foreground">SCORE {hud.score}</span>
+        </div>
+        <div className="relative">
+          <canvas
+            ref={canvasRef}
+            className="neon-box block h-auto w-full border border-player text-player"
+            style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
+          />
+          {hud.phase === "ready" && (
+            <p className="neon-text pointer-events-none absolute inset-0 flex items-center justify-center text-lg tracking-widest text-player select-none">
+              <span className="pointer-coarse:hidden">PRESS SPACE TO START</span>
+              <span className="hidden pointer-coarse:inline">TAP TO START</span>
+            </p>
+          )}
+          {hud.phase === "over" && message && (
+            <div
+              className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/60 ${message.color}`}
+            >
+              <p className="neon-text text-2xl font-black tracking-[0.2em] sm:text-4xl">
+                {message.title}
+              </p>
+              <p className="text-sm tracking-widest">
+                <span className="pointer-coarse:hidden">SPACE </span>
+                <span className="hidden pointer-coarse:inline">タップ</span>
+                {message.hint}
+              </p>
+              {hud.result === "lose" && hud.score > 0 && (
+                <ScoreForm score={hud.score} stage={hud.stage} />
+              )}
+            </div>
+          )}
+        </div>
       </div>
-      <div className="relative">
-        <canvas
-          ref={canvasRef}
-          className="neon-box block h-auto w-full border border-player text-player"
-          style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
-        />
-        {hud.phase === "ready" && (
-          <p className="neon-text pointer-events-none absolute inset-0 flex items-center justify-center text-lg tracking-widest text-player">
-            PRESS SPACE TO START
-          </p>
-        )}
-        {hud.phase === "over" && message && (
-          <div
-            className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/60 ${message.color}`}
+      {/* 以下はタッチ操作のときだけ出す。周りの余白はスワイプできる場所として残す */}
+      <button
+        type="button"
+        disabled={hud.phase !== "running" || hud.boosts === 0}
+        onPointerDown={() => boostRef.current()}
+        className="neon-box hidden size-16 touch-manipulation justify-self-center rounded-full border border-player text-[10px] font-black tracking-widest text-player select-none active:bg-player/20 disabled:opacity-30 lg:size-24 lg:text-sm pointer-coarse:block pointer-coarse:landscape:col-start-1 pointer-coarse:landscape:row-start-1"
+      >
+        BOOST
+      </button>
+      <div className="hidden grid-cols-3 grid-rows-3 gap-1 justify-self-center pointer-coarse:grid pointer-coarse:landscape:col-start-3 pointer-coarse:landscape:row-start-1">
+        {DPAD_BUTTONS.map(({ direction, label, position, rotate }) => (
+          <button
+            key={direction}
+            type="button"
+            aria-label={label}
+            onPointerDown={() => turnRef.current(direction)}
+            className={`neon-box flex size-12 touch-manipulation items-center justify-center border border-player text-player select-none active:bg-player/20 lg:size-16 ${position}`}
           >
-            <p className="neon-text text-4xl font-black tracking-[0.2em]">{message.title}</p>
-            <p className="text-sm tracking-widest">{message.hint}</p>
-            {hud.result === "lose" && hud.score > 0 && (
-              <ScoreForm score={hud.score} stage={hud.stage} />
-            )}
-          </div>
-        )}
+            <svg viewBox="0 0 10 10" aria-hidden="true" className={`size-5 fill-current ${rotate}`}>
+              <path d="M5 1 9 9H1Z" />
+            </svg>
+          </button>
+        ))}
       </div>
     </div>
   );
