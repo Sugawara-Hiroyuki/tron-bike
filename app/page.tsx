@@ -1,4 +1,5 @@
 import Link from "next/link";
+import EntryButton from "@/features/online/EntryButton";
 
 export default function Home() {
   return (
@@ -9,6 +10,8 @@ export default function Home() {
         </h1>
         <p className="text-sm tracking-widest text-foreground/70">
           光の壁で相手を囲め
+          <br />
+          誰かが遊んでいるときは ENTRY で乱入できる
         </p>
       </div>
       <nav className="flex flex-col gap-4 sm:flex-row">
@@ -18,6 +21,7 @@ export default function Home() {
         >
           START
         </Link>
+        <EntryButton />
         <Link
           href="/ranking"
           className="neon-box border border-cpu px-10 py-3 tracking-widest text-cpu transition-colors hover:bg-cpu/10"
