@@ -13,6 +13,9 @@ export type Bike = {
   dir: Direction;
   nextDir: Direction;
   alive: boolean;
+  boostsLeft: number;
+  // ブースト開始からの経過時間。null はブーストしていない
+  boostElapsedMs: number | null;
 };
 
 export type Game = {
@@ -25,9 +28,6 @@ export type Game = {
   result: Result | null;
   stage: number;
   ticks: number;
-  boostsLeft: number;
-  // ブースト開始からの経過時間。null はブーストしていない
-  boostElapsedMs: number | null;
 };
 
 export const CELL: Record<BikeId, number> = { player: 1, cpu: 2 };
@@ -82,22 +82,25 @@ export function isBlocked(game: Game, x: number, y: number): boolean {
   return game.cells[cellIndex(game, x, y)] !== 0;
 }
 
-export function createGame(stage = 1, boostsLeft = MAX_BOOSTS): Game {
+function createBike(id: BikeId, x: number, y: number, dir: Direction, boostsLeft: number): Bike {
+  return { id, x, y, dir, nextDir: dir, alive: true, boostsLeft, boostElapsedMs: null };
+}
+
+// boosts で指定しなかったバイクのブースト残数は MAX_BOOSTS
+export function createGame(stage = 1, boosts: Partial<Record<BikeId, number>> = {}): Game {
   const y = Math.floor(ROWS / 2);
   const game: Game = {
     cols: COLS,
     rows: ROWS,
     cells: new Uint8Array(COLS * ROWS),
     bikes: [
-      { id: "player", x: Math.floor(COLS / 4), y, dir: "right", nextDir: "right", alive: true },
-      { id: "cpu", x: Math.floor((COLS * 3) / 4), y, dir: "left", nextDir: "left", alive: true },
+      createBike("player", Math.floor(COLS / 4), y, "right", boosts.player ?? MAX_BOOSTS),
+      createBike("cpu", Math.floor((COLS * 3) / 4), y, "left", boosts.cpu ?? MAX_BOOSTS),
     ],
     phase: "ready",
     result: null,
     stage,
     ticks: 0,
-    boostsLeft,
-    boostElapsedMs: null,
   };
   for (const bike of game.bikes) {
     game.cells[cellIndex(game, bike.x, bike.y)] = CELL[bike.id];
@@ -116,24 +119,32 @@ export function turn(bike: Bike, dir: Direction): void {
 }
 
 // ブーストは同時に1つだけ。重ねがけはできず、押しても残数は減らない
-export function activateBoost(game: Game): boolean {
-  if (game.phase !== "running" || game.boostsLeft <= 0 || game.boostElapsedMs !== null) {
+export function activateBoost(game: Game, bike: Bike): boolean {
+  if (
+    game.phase !== "running" ||
+    !bike.alive ||
+    bike.boostsLeft <= 0 ||
+    bike.boostElapsedMs !== null
+  ) {
     return false;
   }
-  game.boostsLeft -= 1;
-  game.boostElapsedMs = 0;
+  bike.boostsLeft -= 1;
+  bike.boostElapsedMs = 0;
   return true;
 }
 
 export function advanceBoost(game: Game, dtMs: number): void {
-  if (game.phase !== "running" || game.boostElapsedMs === null) return;
-  game.boostElapsedMs += dtMs;
-  if (game.boostElapsedMs >= BOOST_MS) game.boostElapsedMs = null;
+  if (game.phase !== "running") return;
+  for (const bike of game.bikes) {
+    if (bike.boostElapsedMs === null) continue;
+    bike.boostElapsedMs += dtMs;
+    if (bike.boostElapsedMs >= BOOST_MS) bike.boostElapsedMs = null;
+  }
 }
 
-// 自機の速度倍率。グインと立ち上がり、最後はなめらかに 1 へ戻る
-export function boostMultiplier(game: Game): number {
-  const elapsed = game.boostElapsedMs;
+// バイクの速度倍率。グインと立ち上がり、最後はなめらかに 1 へ戻る
+export function boostMultiplier(bike: Bike): number {
+  const elapsed = bike.boostElapsedMs;
   if (elapsed === null) return 1;
   const extra = BOOST_MULTIPLIER - 1;
   if (elapsed < BOOST_RAMP_UP_MS) {
@@ -193,11 +204,9 @@ export function step(game: Game): void {
   settle(game);
 }
 
-// ブースト中に自機だけを追加で 1 マス進める。ticks は増やさない（スコアの早解きボーナスに影響させない）
-export function boostStep(game: Game): void {
-  if (game.phase !== "running") return;
-  const player = getBike(game, "player");
-  if (!player?.alive) return;
-  moveBikes(game, [player]);
+// ブースト中のバイクだけを追加で 1 マス進める。ticks は増やさない（スコアの早解きボーナスに影響させない）
+export function boostStep(game: Game, bike: Bike): void {
+  if (game.phase !== "running" || !bike.alive) return;
+  moveBikes(game, [bike]);
   settle(game);
 }

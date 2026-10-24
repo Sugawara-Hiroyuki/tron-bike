@@ -7,21 +7,18 @@ import {
   MAX_BOOSTS,
   ROWS,
   activateBoost,
-  advanceBoost,
-  boostMultiplier,
-  boostStep,
   createGame,
   getBike,
   stageScore,
-  step,
-  tickMs,
   turn,
-  type Direction,
   type Phase,
   type Result,
 } from "./engine";
+import { advance, createClock } from "./loop";
 import { CELL_SIZE, draw } from "./renderer";
 import ScoreForm from "./ScoreForm";
+import TouchControls from "./TouchControls";
+import { NOOP_HANDLERS, useGameControls, type ControlHandlers } from "./useGameControls";
 
 const WIDTH = COLS * CELL_SIZE;
 const HEIGHT = ROWS * CELL_SIZE;
@@ -29,34 +26,12 @@ const HEIGHT = ROWS * CELL_SIZE;
 const MAX_FRAME_MS = 250;
 // 決着の直後は SPACE を受け付けない（ブーストの押下で結果画面を飛ばしてしまうのを防ぐ）
 const RESTART_GUARD_MS = 600;
-// これ以上指が動いたらスワイプとみなす
-const SWIPE_THRESHOLD_PX = 24;
-
-const KEY_TO_DIRECTION: Record<string, Direction> = {
-  ArrowUp: "up",
-  ArrowDown: "down",
-  ArrowLeft: "left",
-  ArrowRight: "right",
-  w: "up",
-  s: "down",
-  a: "left",
-  d: "right",
-};
-
 // hint の前には、キーボードなら「SPACE」、タッチ操作なら「タップ」を付けて表示する
 const RESULT_MESSAGES: Record<Result, { title: string; hint: string; color: string }> = {
   win: { title: "YOU WIN", hint: "で次のステージへ", color: "text-player" },
   lose: { title: "GAME OVER", hint: "でもう一度", color: "text-cpu" },
   draw: { title: "DRAW", hint: "で再戦", color: "text-foreground" },
 };
-
-// 方向ボタンの並び。十字に置くための grid 上の位置と、▲ を回す角度を持つ
-const DPAD_BUTTONS: { direction: Direction; label: string; position: string; rotate: string }[] = [
-  { direction: "up", label: "上", position: "col-start-2 row-start-1", rotate: "" },
-  { direction: "left", label: "左", position: "col-start-1 row-start-2", rotate: "-rotate-90" },
-  { direction: "right", label: "右", position: "col-start-3 row-start-2", rotate: "rotate-90" },
-  { direction: "down", label: "下", position: "col-start-2 row-start-3", rotate: "rotate-180" },
-];
 
 // 画面に出す値だけを React の state にする
 type Hud = {
@@ -78,16 +53,15 @@ const INITIAL_HUD: Hud = {
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const touchAreaRef = useRef<HTMLDivElement>(null);
-  // BOOST ボタンと方向ボタンから effect 内のゲームを操作するための橋渡し
-  const boostRef = useRef<() => void>(() => {});
-  const turnRef = useRef<(direction: Direction) => void>(() => {});
+  // 操作（キーボード・タッチ・ボタン）から effect 内のゲームを操作するための橋渡し
+  const handlersRef = useRef<ControlHandlers>(NOOP_HANDLERS);
   const [hud, setHud] = useState<Hud>(INITIAL_HUD);
+  useGameControls(touchAreaRef, handlersRef);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const touchArea = touchAreaRef.current;
     const ctx = canvas?.getContext("2d");
-    if (!canvas || !touchArea || !ctx) return;
+    if (!canvas || !ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     canvas.width = WIDTH * dpr;
@@ -96,32 +70,32 @@ export default function GameCanvas() {
 
     // ゲーム状態は毎フレーム書き換わるので React の state には載せず、effect 内に閉じ込める
     let game = createGame();
+    let player = getBike(game, "player")!;
     let score = 0;
     let shownPhase: Phase = game.phase;
-    let shownBoosts = game.boostsLeft;
+    let shownBoosts = player.boostsLeft;
     // 別ページから戻ると React の state だけ前回の値で残るので、最初のフレームで必ず HUD を合わせ直す
     let hudSynced = false;
     let overAt = 0;
-    let accumulator = 0;
-    let boostAccumulator = 0;
+    let clock = createClock();
     let last = performance.now();
     let frameId = 0;
 
     const syncHud = () => {
-      if (hudSynced && game.phase === shownPhase && game.boostsLeft === shownBoosts) return;
+      if (hudSynced && game.phase === shownPhase && player.boostsLeft === shownBoosts) return;
       hudSynced = true;
       if (game.phase !== shownPhase && game.phase === "over") {
         overAt = performance.now();
         if (game.result === "win") score += stageScore(game.ticks);
       }
       shownPhase = game.phase;
-      shownBoosts = game.boostsLeft;
+      shownBoosts = player.boostsLeft;
       setHud({
         phase: game.phase,
         result: game.result,
         stage: game.stage,
         score,
-        boosts: game.boostsLeft,
+        boosts: player.boostsLeft,
       });
     };
 
@@ -130,17 +104,18 @@ export default function GameCanvas() {
       const stage =
         game.result === "win" ? game.stage + 1 : game.result === "lose" ? 1 : game.stage;
       // ブーストの残数は負けるまで持ち越す
-      game = createGame(stage, game.result === "lose" ? MAX_BOOSTS : game.boostsLeft);
+      game = createGame(stage, {
+        player: game.result === "lose" ? MAX_BOOSTS : player.boostsLeft,
+      });
+      player = getBike(game, "player")!;
       game.phase = "running";
-      accumulator = 0;
-      boostAccumulator = 0;
+      clock = createClock();
     };
 
     const boost = () => {
-      activateBoost(game);
+      activateBoost(game, player);
       syncHud();
     };
-    boostRef.current = boost;
 
     // 走行中でなければ、開始または次のラウンドへ進む
     const startIfIdle = () => {
@@ -150,99 +125,31 @@ export default function GameCanvas() {
       syncHud();
     };
 
-    const turnPlayer = (direction: Direction) => {
-      const player = getBike(game, "player");
-      if (player) turn(player, direction);
-    };
-    turnRef.current = turnPlayer;
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      // 名前入力中のキー（スペースや WASD）をゲーム操作として拾わない
-      if (event.target instanceof HTMLInputElement) return;
-      if (event.key === " ") {
-        event.preventDefault();
-        if (event.repeat) return;
-        if (game.phase === "running") boost();
-        else startIfIdle();
-        return;
-      }
-      const direction = KEY_TO_DIRECTION[event.key];
-      if (!direction) return;
-      event.preventDefault();
-      turnPlayer(direction);
+    handlersRef.current = {
+      turn: (direction) => turn(player, direction),
+      boost,
+      start: startIfIdle,
+      isRunning: () => game.phase === "running",
     };
 
-    // タッチ操作: スワイプした向きに曲がり、タップで開始する（方向ボタンでも曲がれる）。マウスは対象にしない
-    let swipe: { id: number; x: number; y: number; moved: boolean } | null = null;
-
-    // ボタンやスコア登録フォームに触れたときは、ゲーム操作として拾わない
-    const isControl = (target: EventTarget | null) =>
-      target instanceof Element && target.closest("button, a, input, form") !== null;
-
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.pointerType === "mouse" || isControl(event.target)) return;
-      swipe = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
-    };
-
-    const onPointerMove = (event: PointerEvent) => {
-      if (!swipe || event.pointerId !== swipe.id) return;
-      const dx = event.clientX - swipe.x;
-      const dy = event.clientY - swipe.y;
-      if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_THRESHOLD_PX) return;
-      if (Math.abs(dx) > Math.abs(dy)) turnPlayer(dx > 0 ? "right" : "left");
-      else turnPlayer(dy > 0 ? "down" : "up");
-      // 指を離さずに続けて曲がれるよう、基準点をいまの位置に移す
-      swipe = { id: swipe.id, x: event.clientX, y: event.clientY, moved: true };
-    };
-
-    const onPointerUp = (event: PointerEvent) => {
-      if (!swipe || event.pointerId !== swipe.id) return;
-      const tapped = !swipe.moved;
-      swipe = null;
-      if (tapped) startIfIdle();
-    };
-
-    const onPointerCancel = () => {
-      swipe = null;
+    const moveCpu = () => {
+      const cpu = getBike(game, "cpu");
+      if (cpu) turn(cpu, chooseDirection(game, cpu));
     };
 
     const frame = (now: number) => {
       const dt = Math.min(now - last, MAX_FRAME_MS);
-      accumulator += dt;
       last = now;
-      const interval = tickMs(game.stage);
-      while (accumulator >= interval) {
-        const cpu = getBike(game, "cpu");
-        if (cpu && game.phase === "running") turn(cpu, chooseDirection(game, cpu));
-        step(game);
-        accumulator -= interval;
-      }
-      // 倍率が 1 を超えたぶんだけ、自機を追加で進める
-      boostAccumulator += dt * (boostMultiplier(game) - 1);
-      advanceBoost(game, dt);
-      while (boostAccumulator >= interval) {
-        boostStep(game);
-        boostAccumulator -= interval;
-      }
-      if (game.boostElapsedMs === null) boostAccumulator = 0;
+      advance(game, clock, dt, moveCpu);
       syncHud();
       draw(ctx, game);
       frameId = requestAnimationFrame(frame);
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    touchArea.addEventListener("pointerdown", onPointerDown);
-    touchArea.addEventListener("pointermove", onPointerMove);
-    touchArea.addEventListener("pointerup", onPointerUp);
-    touchArea.addEventListener("pointercancel", onPointerCancel);
     frameId = requestAnimationFrame(frame);
 
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      touchArea.removeEventListener("pointerdown", onPointerDown);
-      touchArea.removeEventListener("pointermove", onPointerMove);
-      touchArea.removeEventListener("pointerup", onPointerUp);
-      touchArea.removeEventListener("pointercancel", onPointerCancel);
+      handlersRef.current = NOOP_HANDLERS;
       cancelAnimationFrame(frameId);
     };
   }, []);
@@ -303,29 +210,10 @@ export default function GameCanvas() {
         </div>
       </div>
       {/* 以下はタッチ操作のときだけ出す。周りの余白はスワイプできる場所として残す */}
-      <button
-        type="button"
-        disabled={hud.phase !== "running" || hud.boosts === 0}
-        onPointerDown={() => boostRef.current()}
-        className="neon-box hidden size-16 touch-manipulation justify-self-center rounded-full border border-player text-[10px] font-black tracking-widest text-player select-none active:bg-player/20 disabled:opacity-30 lg:size-24 lg:text-sm pointer-coarse:block pointer-coarse:landscape:col-start-1 pointer-coarse:landscape:row-start-1"
-      >
-        BOOST
-      </button>
-      <div className="hidden grid-cols-3 grid-rows-3 gap-1 justify-self-center pointer-coarse:grid pointer-coarse:landscape:col-start-3 pointer-coarse:landscape:row-start-1">
-        {DPAD_BUTTONS.map(({ direction, label, position, rotate }) => (
-          <button
-            key={direction}
-            type="button"
-            aria-label={label}
-            onPointerDown={() => turnRef.current(direction)}
-            className={`neon-box flex size-12 touch-manipulation items-center justify-center border border-player text-player select-none active:bg-player/20 lg:size-16 ${position}`}
-          >
-            <svg viewBox="0 0 10 10" aria-hidden="true" className={`size-5 fill-current ${rotate}`}>
-              <path d="M5 1 9 9H1Z" />
-            </svg>
-          </button>
-        ))}
-      </div>
+      <TouchControls
+        handlersRef={handlersRef}
+        boostDisabled={hud.phase !== "running" || hud.boosts === 0}
+      />
     </div>
   );
 }

@@ -49,8 +49,8 @@ export function draw(ctx: CanvasRenderingContext2D, game: Game): void {
     ctx.fillStyle = color;
     ctx.fill();
 
-    // ブースト中は自機の発光を強め、加速と減速が目で分かるようにする
-    ctx.shadowBlur = bike.id === "player" ? 20 * boostMultiplier(game) : 20;
+    // ブースト中は発光を強め、加速と減速が目で分かるようにする
+    ctx.shadowBlur = 20 * boostMultiplier(bike);
     ctx.fillStyle = bike.alive ? "#ffffff" : color;
     ctx.fillRect(bike.x * CELL_SIZE, bike.y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
   }
