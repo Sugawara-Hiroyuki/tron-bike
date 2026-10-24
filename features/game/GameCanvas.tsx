@@ -1,6 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { getAccepts, getServerAccepts, setAccepts, subscribeAccepts } from "@/features/online/accepts";
+import { isOnlineEnabled } from "@/features/online/client";
+import { entryCandidates, openLobby, randomId, type Lobby } from "@/features/online/lobby";
+import {
+  createVersusGuest,
+  createVersusHost,
+  type VersusEnd,
+  type VersusSession,
+  type VersusView,
+} from "@/features/online/versus";
+import { VersusHeader, VersusOverlay } from "@/features/online/VersusHud";
 import { chooseDirection } from "./ai";
 import {
   COLS,
@@ -18,14 +29,33 @@ import { advance, createClock } from "./loop";
 import { CELL_SIZE, draw } from "./renderer";
 import ScoreForm from "./ScoreForm";
 import TouchControls from "./TouchControls";
-import { NOOP_HANDLERS, useGameControls, type ControlHandlers } from "./useGameControls";
+import {
+  NOOP_HANDLERS,
+  RESTART_GUARD_MS,
+  useGameControls,
+  type ControlHandlers,
+} from "./useGameControls";
 
 const WIDTH = COLS * CELL_SIZE;
 const HEIGHT = ROWS * CELL_SIZE;
 // タブが裏に回って戻ったときに、溜まった時間ぶん一気に進まないようにする上限
 const MAX_FRAME_MS = 250;
-// 決着の直後は SPACE を受け付けない（ブーストの押下で結果画面を飛ばしてしまうのを防ぐ）
-const RESTART_GUARD_MS = 600;
+// 乱入先が見つからない・申し込みに返事が来ないときは、あきらめて CPU 戦にする
+const SEARCH_TIMEOUT_MS = 3000;
+const REPLY_TIMEOUT_MS = 10_000;
+const NOTICE_MS = 4000;
+
+const CHALLENGER_NOTICE = "挑戦者が現れた！ このラウンドのあと対戦します";
+const ENTRY_FAILED_NOTICES = {
+  none: "乱入できる相手がいません。CPU と対戦します",
+  busy: "先を越されました。CPU と対戦します",
+};
+const VERSUS_END_NOTICES: Record<VersusEnd, string | null> = {
+  finished: null,
+  disconnected: "相手が切断しました",
+  timeout: "相手とつながりませんでした",
+};
+
 // hint の前には、キーボードなら「SPACE」、タッチ操作なら「タップ」を付けて表示する
 const RESULT_MESSAGES: Record<Result, { title: string; hint: string; color: string }> = {
   win: { title: "YOU WIN", hint: "で次のステージへ", color: "text-player" },
@@ -55,7 +85,15 @@ export default function GameCanvas() {
   const touchAreaRef = useRef<HTMLDivElement>(null);
   // 操作（キーボード・タッチ・ボタン）から effect 内のゲームを操作するための橋渡し
   const handlersRef = useRef<ControlHandlers>(NOOP_HANDLERS);
+  // トップの ENTRY から来たか。最初の effect で URL から読む
+  const entryRef = useRef<boolean | null>(null);
   const [hud, setHud] = useState<Hud>(INITIAL_HUD);
+  // 対戦中だけ値が入る
+  const [versusView, setVersusView] = useState<VersusView | null>(null);
+  const [entering, setEntering] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const accepts = useSyncExternalStore(subscribeAccepts, getAccepts, getServerAccepts);
+  const online = isOnlineEnabled();
   useGameControls(touchAreaRef, handlersRef);
 
   useEffect(() => {
@@ -117,6 +155,113 @@ export default function GameCanvas() {
       syncHud();
     };
 
+    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    const showNotice = (text: string | null, sticky = false) => {
+      clearTimeout(noticeTimer);
+      setNotice(text);
+      if (text && !sticky) noticeTimer = setTimeout(() => setNotice(null), NOTICE_MS);
+    };
+
+    // オンライン対戦。CPU 戦の状態（game, score など）は対戦の間そのまま残し、終わったら続きから遊べるようにする
+    const clientId = randomId();
+    const since = Date.now();
+    let lobby: Lobby | null = null;
+    let versus: VersusSession | null = null;
+    // 乱入を受けて、CPU 戦のラウンドが終わるのを待っている部屋
+    let pendingRoomId: string | null = null;
+    // 乱入する側: 申し込み中の相手
+    let isEntering = false;
+    let challengedTo: string | null = null;
+    let replyTimer: ReturnType<typeof setTimeout> | undefined;
+    let shownEntering = false;
+
+    const trackLobby = () => {
+      lobby?.track({
+        clientId,
+        since,
+        accepts: getAccepts(),
+        status:
+          versus || pendingRoomId
+            ? "versus"
+            : isEntering
+              ? "entry"
+              : document.hidden
+                ? "away"
+                : "solo",
+      });
+    };
+
+    const endVersus = (reason: VersusEnd) => {
+      versus?.dispose();
+      versus = null;
+      setVersusView(null);
+      showNotice(VERSUS_END_NOTICES[reason]);
+      // CPU 戦の HUD を出し直す
+      hudSynced = false;
+      trackLobby();
+    };
+
+    const startVersus = (role: "host" | "guest", roomId: string) => {
+      const create = role === "host" ? createVersusHost : createVersusGuest;
+      versus = create({ roomId, onView: setVersusView, onEnd: endVersus });
+      trackLobby();
+    };
+
+    const finishEntry = (reason: keyof typeof ENTRY_FAILED_NOTICES) => {
+      clearTimeout(replyTimer);
+      isEntering = false;
+      showNotice(ENTRY_FAILED_NOTICES[reason]);
+      trackLobby();
+    };
+
+    if (isOnlineEnabled()) {
+      // トップの ENTRY から来たときは乱入する。リロードで再び乱入しないよう URL からは消しておく
+      // （開発時は effect が 2 回走るので、1 回目に読んだ結果を ref に残す）
+      if (entryRef.current === null) {
+        entryRef.current = new URLSearchParams(location.search).get("entry") === "1";
+        if (entryRef.current) history.replaceState(null, "", location.pathname);
+      }
+      isEntering = entryRef.current;
+      if (isEntering) replyTimer = setTimeout(() => finishEntry("none"), SEARCH_TIMEOUT_MS);
+
+      lobby = openLobby({
+        onMembers: (members) => {
+          if (!isEntering || challengedTo) return;
+          // 顔ぶれは接続直後に何度か更新されるので、見つからなくてもしばらく待つ
+          const target = entryCandidates(members, clientId)[0];
+          if (!target) return;
+          challengedTo = target.clientId;
+          lobby?.challenge({ from: clientId, to: target.clientId });
+          clearTimeout(replyTimer);
+          replyTimer = setTimeout(() => finishEntry("busy"), REPLY_TIMEOUT_MS);
+        },
+        onChallenge: ({ from, to }) => {
+          if (to !== clientId) return;
+          // 受けるのは先着 1 人だけ
+          const ok = getAccepts() && !document.hidden && !versus && !pendingRoomId && !isEntering;
+          const roomId = ok ? randomId() : null;
+          lobby?.reply({ from: clientId, to: from, ok, roomId });
+          if (!roomId) return;
+          pendingRoomId = roomId;
+          showNotice(CHALLENGER_NOTICE, true);
+          trackLobby();
+        },
+        onReply: ({ from, to, ok, roomId }) => {
+          if (!isEntering || to !== clientId || from !== challengedTo) return;
+          if (!ok || !roomId) {
+            finishEntry("busy");
+            return;
+          }
+          clearTimeout(replyTimer);
+          isEntering = false;
+          startVersus("guest", roomId);
+        },
+      });
+      trackLobby();
+    }
+    const unsubscribeAccepts = subscribeAccepts(trackLobby);
+    document.addEventListener("visibilitychange", trackLobby);
+
     // 走行中でなければ、開始または次のラウンドへ進む
     const startIfIdle = () => {
       if (game.phase === "running") return;
@@ -125,11 +270,15 @@ export default function GameCanvas() {
       syncHud();
     };
 
+    // 対戦中は対戦の操作に回す。乱入先を探している間は CPU 戦を始めない
     handlersRef.current = {
-      turn: (direction) => turn(player, direction),
-      boost,
-      start: startIfIdle,
-      isRunning: () => game.phase === "running",
+      turn: (direction) => (versus ? versus.handlers.turn(direction) : turn(player, direction)),
+      boost: () => (versus ? versus.handlers.boost() : boost()),
+      start: () => {
+        if (versus) versus.handlers.start();
+        else if (!isEntering) startIfIdle();
+      },
+      isRunning: () => (versus ? versus.handlers.isRunning() : game.phase === "running"),
     };
 
     const moveCpu = () => {
@@ -140,9 +289,25 @@ export default function GameCanvas() {
     const frame = (now: number) => {
       const dt = Math.min(now - last, MAX_FRAME_MS);
       last = now;
-      advance(game, clock, dt, moveCpu);
-      syncHud();
-      draw(ctx, game);
+      if (isEntering !== shownEntering) {
+        shownEntering = isEntering;
+        setEntering(isEntering);
+      }
+      versus?.frame(dt);
+      if (versus) {
+        draw(ctx, versus.game);
+      } else {
+        advance(game, clock, dt, moveCpu);
+        syncHud();
+        // 乱入を受けていたら、CPU 戦のラウンドが終わったところで対戦に切り替える
+        if (pendingRoomId && game.phase !== "running") {
+          const roomId = pendingRoomId;
+          pendingRoomId = null;
+          showNotice(null);
+          startVersus("host", roomId);
+        }
+        draw(ctx, game);
+      }
       frameId = requestAnimationFrame(frame);
     };
 
@@ -151,6 +316,12 @@ export default function GameCanvas() {
     return () => {
       handlersRef.current = NOOP_HANDLERS;
       cancelAnimationFrame(frameId);
+      clearTimeout(noticeTimer);
+      clearTimeout(replyTimer);
+      unsubscribeAccepts();
+      document.removeEventListener("visibilitychange", trackLobby);
+      versus?.dispose();
+      lobby?.close();
     };
   }, []);
 
@@ -165,32 +336,59 @@ export default function GameCanvas() {
     >
       {/* 横向きでは、画面の高さに収まるいちばん大きな幅まで広げる */}
       <div className="flex w-full flex-col gap-3 pointer-coarse:col-span-2 pointer-coarse:landscape:col-span-1 pointer-coarse:landscape:col-start-2 pointer-coarse:landscape:row-start-1 pointer-coarse:landscape:max-w-[calc((100dvh_-_4.5rem)_*_1.6)] pointer-coarse:landscape:gap-2 pointer-coarse:landscape:justify-self-center">
-        <div className="flex justify-between text-xs tracking-widest select-none sm:text-sm">
-          <span className="text-player">STAGE {hud.stage}</span>
-          <span className="flex items-center gap-2 text-player">
-            BOOST
-            {Array.from({ length: MAX_BOOSTS }, (_, i) => (
-              <span
-                key={i}
-                className={`h-2 w-4 border border-player ${i < hud.boosts ? "bg-player" : ""}`}
-              />
-            ))}
-          </span>
-          <span className="font-mono text-foreground">SCORE {hud.score}</span>
-        </div>
+        {versusView ? (
+          <VersusHeader view={versusView} />
+        ) : (
+          <div className="flex justify-between text-xs tracking-widest select-none sm:text-sm">
+            <span className="text-player">STAGE {hud.stage}</span>
+            <span className="flex items-center gap-2 text-player">
+              BOOST
+              {Array.from({ length: MAX_BOOSTS }, (_, i) => (
+                <span
+                  key={i}
+                  className={`h-2 w-4 border border-player ${i < hud.boosts ? "bg-player" : ""}`}
+                />
+              ))}
+            </span>
+            <span className="flex items-center gap-3">
+              <span className="font-mono text-foreground">SCORE {hud.score}</span>
+              {online && (
+                <button
+                  type="button"
+                  aria-pressed={accepts}
+                  title="ほかの人の乱入を受け付けるか"
+                  onClick={(event) => {
+                    setAccepts(!accepts);
+                    // フォーカスが残ると、SPACE でこのボタンが押されてしまう
+                    event.currentTarget.blur();
+                  }}
+                  className={`border px-1.5 text-[10px] tracking-widest sm:text-xs ${accepts ? "border-cpu text-cpu" : "border-foreground/40 text-foreground/40"}`}
+                >
+                  乱入 {accepts ? "OK" : "NG"}
+                </button>
+              )}
+            </span>
+          </div>
+        )}
         <div className="relative">
           <canvas
             ref={canvasRef}
             className="neon-box block h-auto w-full border border-player text-player"
             style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
           />
-          {hud.phase === "ready" && (
+          {versusView && <VersusOverlay view={versusView} />}
+          {!versusView && hud.phase === "ready" && entering && (
+            <p className="neon-text pointer-events-none absolute inset-0 flex items-center justify-center text-lg tracking-widest text-cpu select-none">
+              SEARCHING FOR RIVAL…
+            </p>
+          )}
+          {!versusView && hud.phase === "ready" && !entering && (
             <p className="neon-text pointer-events-none absolute inset-0 flex items-center justify-center text-lg tracking-widest text-player select-none">
               <span className="pointer-coarse:hidden">PRESS SPACE TO START</span>
               <span className="hidden pointer-coarse:inline">TAP TO START</span>
             </p>
           )}
-          {hud.phase === "over" && message && (
+          {!versusView && hud.phase === "over" && message && (
             <div
               className={`absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/60 ${message.color}`}
             >
@@ -207,12 +405,21 @@ export default function GameCanvas() {
               )}
             </div>
           )}
+          {notice && (
+            <p className="neon-text pointer-events-none absolute inset-x-0 top-3 text-center text-xs tracking-widest text-cpu select-none sm:text-sm">
+              {notice}
+            </p>
+          )}
         </div>
       </div>
       {/* 以下はタッチ操作のときだけ出す。周りの余白はスワイプできる場所として残す */}
       <TouchControls
         handlersRef={handlersRef}
-        boostDisabled={hud.phase !== "running" || hud.boosts === 0}
+        boostDisabled={
+          versusView
+            ? versusView.phase !== "running" || versusView.boosts === 0
+            : hud.phase !== "running" || hud.boosts === 0
+        }
       />
     </div>
   );

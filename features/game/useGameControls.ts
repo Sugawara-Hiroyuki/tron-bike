@@ -3,6 +3,9 @@
 import { useEffect, type RefObject } from "react";
 import type { Direction } from "./engine";
 
+// 決着の直後は SPACE を受け付けない（ブーストの押下で結果画面を飛ばしてしまうのを防ぐ）
+export const RESTART_GUARD_MS = 600;
+
 // これ以上指が動いたらスワイプとみなす
 const SWIPE_THRESHOLD_PX = 24;
 
